@@ -1028,7 +1028,7 @@ XXH_PUBLIC_API XXH_PUREF XXH64_hash_t XXH64_hashFromCanonical(XXH_NOESCAPE const
  *   - WebAssembly SIMD128
  *   - POWER8 VSX
  *   - s390x ZVector
- *   - RISC-V Vector (RVV) - placeholder implementation
+ *   - RISC-V Vector (RVV) - full implementation
  * This can be controlled via the @ref XXH_VECTOR macro, but it automatically
  * selects the best version according to predefined macros. For the x86 family, an
  * automatic runtime dispatcher is included separately in @ref xxh_x86dispatch.c.
@@ -3956,16 +3956,30 @@ do { \
 
 #if XXH_VECTOR == XXH_RVV
 /* RISC-V Vector (RVV) type definitions and helper macros */
-/* TODO: Implement RISC-V RVV specific types and operations */
-/* These are placeholders for future RISC-V RVV implementation */
-typedef uint64_t xxh_rvv_u64_t;  /* Placeholder for RVV 64-bit vector type */
-typedef uint32_t xxh_rvv_u32_t;  /* Placeholder for RVV 32-bit vector type */
+/* RISC-V vector types for various bit widths */
+typedef vuint64m1_t xxh_rvv_u64m1_t;  /* 64-bit unsigned integer vector, LMUL=1 */
+typedef vuint32m1_t xxh_rvv_u32m1_t;  /* 32-bit unsigned integer vector, LMUL=1 */
+typedef vuint64m2_t xxh_rvv_u64m2_t;  /* 64-bit unsigned integer vector, LMUL=2 */
+typedef vuint32m2_t xxh_rvv_u32m2_t;  /* 32-bit unsigned integer vector, LMUL=2 */
+typedef vuint8m1_t xxh_rvv_u8m1_t;    /* 8-bit unsigned integer vector, LMUL=1 */
 
-/* Placeholder macro for RISC-V RVV accumulate operation */
+/* RISC-V RVV accumulate operation macro */
 #define ACCRND_RVV(acc, offset) \
 do { \
-    /* TODO: Implement RISC-V RVV accumulate operation */ \
-    /* This should use RISC-V vector intrinsics when available */ \
+    /* Load input and secret vectors */ \
+    xxh_rvv_u64m1_t input_vec = vle64_v_u64m1(xinput + offset, vl); \
+    xxh_rvv_u64m1_t secret_vec = vle64_v_u64m1(xsecret + offset, vl); \
+    /* XOR secret with input */ \
+    xxh_rvv_u64m1_t mixed = vxor_vv_u64m1(secret_vec, input_vec, vl); \
+    /* Swap bytes in input vector */ \
+    xxh_rvv_u64m1_t swapped = vrev8_v_u64m1(input_vec, vl); \
+    /* Extract low and high 32-bit parts and convert to 64-bit */ \
+    xxh_rvv_u64m1_t mixed_lo = vzext_vf2_u64m1(vnsrl_wx_u32m1(mixed, 0, vl), vl); \
+    xxh_rvv_u64m1_t mixed_hi = vzext_vf2_u64m1(vnsrl_wx_u32m1(mixed, 32, vl), vl); \
+    /* Multiply low and high parts, then add to swapped */ \
+    xxh_rvv_u64m1_t mul = vadd_vv_u64m1(vmul_vv_u64m1(mixed_lo, mixed_hi, vl), swapped, vl); \
+    /* Add to accumulator */ \
+    acc = vadd_vv_u64m1(acc, mul, vl); \
 } while (0)
 #endif /* XXH_VECTOR == XXH_RVV */
 
@@ -5314,12 +5328,41 @@ XXH3_accumulate_512_rvv( void* XXH_RESTRICT acc,
                    const void* XXH_RESTRICT input,
                    const void* XXH_RESTRICT secret)
 {
-    /* TODO: Implement RISC-V RVV accumulate_512 function */
-    /* This is a placeholder that falls back to scalar implementation */
-    /* Future implementation should use RISC-V vector intrinsics */
+    uint64_t *xacc = (uint64_t *)acc;
+    const uint64_t *xinput = (const uint64_t *)(const void *)input;
+    const uint64_t *xsecret = (const uint64_t *)(const void *)secret;
     
-    /* For now, fall back to scalar implementation */
-    XXH3_accumulate_512_scalar(acc, input, secret);
+    /* Set vector length for 64-bit elements */
+    size_t vl = vsetvl_e64m1(8); /* Process 8 64-bit elements at once */
+    
+    if (vl >= 8) {
+        /* Process all 8 accumulators at once */
+        xxh_rvv_u64m1_t vacc = vle64_v_u64m1(xacc, vl);
+        ACCRND_RVV(vacc, 0);
+        vse64_v_u64m1(xacc, vacc, vl);
+    } else if (vl >= 4) {
+        /* Process 4 accumulators at a time */
+        xxh_rvv_u64m1_t acc0 = vle64_v_u64m1(xacc + 0, vl);
+        xxh_rvv_u64m1_t acc1 = vle64_v_u64m1(xacc + 4, vl);
+        ACCRND_RVV(acc0, 0);
+        ACCRND_RVV(acc1, 4);
+        vse64_v_u64m1(xacc + 0, acc0, vl);
+        vse64_v_u64m1(xacc + 4, acc1, vl);
+    } else {
+        /* Process 2 accumulators at a time */
+        xxh_rvv_u64m1_t acc0 = vle64_v_u64m1(xacc + 0, vl);
+        xxh_rvv_u64m1_t acc1 = vle64_v_u64m1(xacc + 2, vl);
+        xxh_rvv_u64m1_t acc2 = vle64_v_u64m1(xacc + 4, vl);
+        xxh_rvv_u64m1_t acc3 = vle64_v_u64m1(xacc + 6, vl);
+        ACCRND_RVV(acc0, 0);
+        ACCRND_RVV(acc1, 2);
+        ACCRND_RVV(acc2, 4);
+        ACCRND_RVV(acc3, 6);
+        vse64_v_u64m1(xacc + 0, acc0, vl);
+        vse64_v_u64m1(xacc + 2, acc1, vl);
+        vse64_v_u64m1(xacc + 4, acc2, vl);
+        vse64_v_u64m1(xacc + 6, acc3, vl);
+    }
 }
 
 XXH_FORCE_INLINE void
@@ -5328,34 +5371,180 @@ XXH3_accumulate_rvv(xxh_u64* XXH_RESTRICT acc,
                const xxh_u8* XXH_RESTRICT secret,
                size_t nbStripes)
 {
-    /* TODO: Implement RISC-V RVV accumulate function */
-    /* This is a placeholder that falls back to scalar implementation */
-    /* Future implementation should use RISC-V vector intrinsics */
-    
-    /* For now, fall back to scalar implementation */
-    XXH3_accumulate_scalar(acc, input, secret, nbStripes);
+    if (nbStripes != 0) {
+        uint64_t *xacc = (uint64_t *)acc;
+        const uint64_t *xinput = (const uint64_t *)(const void *)input;
+        const uint64_t *xsecret = (const uint64_t *)(const void *)secret;
+        
+        /* Set vector length for 64-bit elements */
+        size_t vl = vsetvl_e64m1(8); /* Process 8 64-bit elements at once */
+        
+        if (vl >= 8) {
+            /* Process all 8 accumulators at once */
+            xxh_rvv_u64m1_t vacc = vle64_v_u64m1(xacc + 0, vl);
+            do {
+                /* Prefetch next iteration */
+                vprefetch_v(xinput + 128, vl);
+                ACCRND_RVV(vacc, 0);
+                xinput += 8;
+                xsecret += 1;
+                nbStripes--;
+            } while (nbStripes != 0);
+            vse64_v_u64m1(xacc + 0, vacc, vl);
+        } else if (vl >= 4) {
+            /* Process 4 accumulators at a time */
+            xxh_rvv_u64m1_t acc0 = vle64_v_u64m1(xacc + 0, vl);
+            xxh_rvv_u64m1_t acc1 = vle64_v_u64m1(xacc + 4, vl);
+            do {
+                vprefetch_v(xinput + 128, vl);
+                ACCRND_RVV(acc0, 0);
+                ACCRND_RVV(acc1, 4);
+                xinput += 8;
+                xsecret += 1;
+                nbStripes--;
+            } while (nbStripes != 0);
+            vse64_v_u64m1(xacc + 0, acc0, vl);
+            vse64_v_u64m1(xacc + 4, acc1, vl);
+        } else {
+            /* Process 2 accumulators at a time */
+            xxh_rvv_u64m1_t acc0 = vle64_v_u64m1(xacc + 0, vl);
+            xxh_rvv_u64m1_t acc1 = vle64_v_u64m1(xacc + 2, vl);
+            xxh_rvv_u64m1_t acc2 = vle64_v_u64m1(xacc + 4, vl);
+            xxh_rvv_u64m1_t acc3 = vle64_v_u64m1(xacc + 6, vl);
+            do {
+                vprefetch_v(xinput + 128, vl);
+                ACCRND_RVV(acc0, 0);
+                ACCRND_RVV(acc1, 2);
+                ACCRND_RVV(acc2, 4);
+                ACCRND_RVV(acc3, 6);
+                xinput += 8;
+                xsecret += 1;
+                nbStripes--;
+            } while (nbStripes != 0);
+            vse64_v_u64m1(xacc + 0, acc0, vl);
+            vse64_v_u64m1(xacc + 2, acc1, vl);
+            vse64_v_u64m1(xacc + 4, acc2, vl);
+            vse64_v_u64m1(xacc + 6, acc3, vl);
+        }
+    }
 }
 
 XXH_FORCE_INLINE void
 XXH3_scrambleAcc_rvv(void* XXH_RESTRICT acc, const void* XXH_RESTRICT secret)
 {
-    /* TODO: Implement RISC-V RVV scramble function */
-    /* This is a placeholder that falls back to scalar implementation */
-    /* Future implementation should use RISC-V vector intrinsics */
+    uint64_t *xacc = (uint64_t *)acc;
+    const uint64_t *xsecret = (const uint64_t *)(const void *)secret;
     
-    /* For now, fall back to scalar implementation */
-    XXH3_scrambleAcc_scalar(acc, secret);
+    /* Set vector length for 64-bit elements */
+    size_t vl = vsetvl_e64m1(8); /* Process 8 64-bit elements at once */
+    
+    if (vl >= 8) {
+        /* Process all 8 accumulators at once */
+        xxh_rvv_u64m1_t vacc = vle64_v_u64m1(xacc, vl);
+        xxh_rvv_u64m1_t vsecret = vle64_v_u64m1(xsecret, vl);
+        
+        /* Right shift by 47 bits */
+        xxh_rvv_u64m1_t shifted = vsrl_vx_u64m1(vacc, 47, vl);
+        /* XOR with original */
+        xxh_rvv_u64m1_t xored = vxor_vv_u64m1(vacc, shifted, vl);
+        /* XOR with secret */
+        xxh_rvv_u64m1_t mixed = vxor_vv_u64m1(xored, vsecret, vl);
+        /* Multiply by prime */
+        xxh_rvv_u64m1_t result = vmul_vx_u64m1(mixed, XXH_PRIME32_1, vl);
+        
+        vse64_v_u64m1(xacc, result, vl);
+    } else if (vl >= 4) {
+        /* Process 4 accumulators at a time */
+        xxh_rvv_u64m1_t acc0 = vle64_v_u64m1(xacc + 0, vl);
+        xxh_rvv_u64m1_t acc1 = vle64_v_u64m1(xacc + 4, vl);
+        xxh_rvv_u64m1_t secret0 = vle64_v_u64m1(xsecret + 0, vl);
+        xxh_rvv_u64m1_t secret1 = vle64_v_u64m1(xsecret + 4, vl);
+        
+        /* Process first 4 */
+        xxh_rvv_u64m1_t shifted0 = vsrl_vx_u64m1(acc0, 47, vl);
+        xxh_rvv_u64m1_t xored0 = vxor_vv_u64m1(acc0, shifted0, vl);
+        xxh_rvv_u64m1_t mixed0 = vxor_vv_u64m1(xored0, secret0, vl);
+        xxh_rvv_u64m1_t result0 = vmul_vx_u64m1(mixed0, XXH_PRIME32_1, vl);
+        
+        /* Process second 4 */
+        xxh_rvv_u64m1_t shifted1 = vsrl_vx_u64m1(acc1, 47, vl);
+        xxh_rvv_u64m1_t xored1 = vxor_vv_u64m1(acc1, shifted1, vl);
+        xxh_rvv_u64m1_t mixed1 = vxor_vv_u64m1(xored1, secret1, vl);
+        xxh_rvv_u64m1_t result1 = vmul_vx_u64m1(mixed1, XXH_PRIME32_1, vl);
+        
+        vse64_v_u64m1(xacc + 0, result0, vl);
+        vse64_v_u64m1(xacc + 4, result1, vl);
+    } else {
+        /* Process 2 accumulators at a time */
+        xxh_rvv_u64m1_t acc0 = vle64_v_u64m1(xacc + 0, vl);
+        xxh_rvv_u64m1_t acc1 = vle64_v_u64m1(xacc + 2, vl);
+        xxh_rvv_u64m1_t acc2 = vle64_v_u64m1(xacc + 4, vl);
+        xxh_rvv_u64m1_t acc3 = vle64_v_u64m1(xacc + 6, vl);
+        xxh_rvv_u64m1_t secret0 = vle64_v_u64m1(xsecret + 0, vl);
+        xxh_rvv_u64m1_t secret1 = vle64_v_u64m1(xsecret + 2, vl);
+        xxh_rvv_u64m1_t secret2 = vle64_v_u64m1(xsecret + 4, vl);
+        xxh_rvv_u64m1_t secret3 = vle64_v_u64m1(xsecret + 6, vl);
+        
+        /* Process each pair */
+        xxh_rvv_u64m1_t shifted0 = vsrl_vx_u64m1(acc0, 47, vl);
+        xxh_rvv_u64m1_t xored0 = vxor_vv_u64m1(acc0, shifted0, vl);
+        xxh_rvv_u64m1_t mixed0 = vxor_vv_u64m1(xored0, secret0, vl);
+        xxh_rvv_u64m1_t result0 = vmul_vx_u64m1(mixed0, XXH_PRIME32_1, vl);
+        
+        xxh_rvv_u64m1_t shifted1 = vsrl_vx_u64m1(acc1, 47, vl);
+        xxh_rvv_u64m1_t xored1 = vxor_vv_u64m1(acc1, shifted1, vl);
+        xxh_rvv_u64m1_t mixed1 = vxor_vv_u64m1(xored1, secret1, vl);
+        xxh_rvv_u64m1_t result1 = vmul_vx_u64m1(mixed1, XXH_PRIME32_1, vl);
+        
+        xxh_rvv_u64m1_t shifted2 = vsrl_vx_u64m1(acc2, 47, vl);
+        xxh_rvv_u64m1_t xored2 = vxor_vv_u64m1(acc2, shifted2, vl);
+        xxh_rvv_u64m1_t mixed2 = vxor_vv_u64m1(xored2, secret2, vl);
+        xxh_rvv_u64m1_t result2 = vmul_vx_u64m1(mixed2, XXH_PRIME32_1, vl);
+        
+        xxh_rvv_u64m1_t shifted3 = vsrl_vx_u64m1(acc3, 47, vl);
+        xxh_rvv_u64m1_t xored3 = vxor_vv_u64m1(acc3, shifted3, vl);
+        xxh_rvv_u64m1_t mixed3 = vxor_vv_u64m1(xored3, secret3, vl);
+        xxh_rvv_u64m1_t result3 = vmul_vx_u64m1(mixed3, XXH_PRIME32_1, vl);
+        
+        vse64_v_u64m1(xacc + 0, result0, vl);
+        vse64_v_u64m1(xacc + 2, result1, vl);
+        vse64_v_u64m1(xacc + 4, result2, vl);
+        vse64_v_u64m1(xacc + 6, result3, vl);
+    }
 }
 
 XXH_FORCE_INLINE void
 XXH3_initCustomSecret_rvv(void* XXH_RESTRICT customSecret, xxh_u64 seed64)
 {
-    /* TODO: Implement RISC-V RVV init custom secret function */
-    /* This is a placeholder that falls back to scalar implementation */
-    /* Future implementation should use RISC-V vector intrinsics */
+    /* For initialization, we can use vector operations to process multiple elements at once */
+    xxh_u8* const ptr = (xxh_u8*)customSecret;
+    const xxh_u8* const kSecretPtr = XXH3_kSecret;
     
-    /* For now, fall back to scalar implementation */
-    XXH3_initCustomSecret_scalar(customSecret, seed64);
+    /* Set vector length for 8-bit elements */
+    size_t vl = vsetvl_e8m1(XXH_SECRET_DEFAULT_SIZE);
+    
+    if (vl >= XXH_SECRET_DEFAULT_SIZE) {
+        /* Process all at once */
+        xxh_rvv_u8m1_t vsecret = vle8_v_u8m1(kSecretPtr, vl);
+        xxh_rvv_u8m1_t vseed = vmv_v_x_u8m1((xxh_u8)seed64, vl);
+        xxh_rvv_u8m1_t vresult = vadd_vv_u8m1(vsecret, vseed, vl);
+        vse8_v_u8m1(ptr, vresult, vl);
+    } else {
+        /* Process in chunks */
+        size_t remaining = XXH_SECRET_DEFAULT_SIZE;
+        size_t offset = 0;
+        
+        while (remaining > 0) {
+            size_t chunk_size = (remaining > vl) ? vl : remaining;
+            xxh_rvv_u8m1_t vsecret = vle8_v_u8m1(kSecretPtr + offset, chunk_size);
+            xxh_rvv_u8m1_t vseed = vmv_v_x_u8m1((xxh_u8)seed64, chunk_size);
+            xxh_rvv_u8m1_t vresult = vadd_vv_u8m1(vsecret, vseed, chunk_size);
+            vse8_v_u8m1(ptr + offset, vresult, chunk_size);
+            
+            offset += chunk_size;
+            remaining -= chunk_size;
+        }
+    }
 }
 
 #endif
