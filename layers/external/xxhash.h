@@ -1028,6 +1028,7 @@ XXH_PUBLIC_API XXH_PUREF XXH64_hash_t XXH64_hashFromCanonical(XXH_NOESCAPE const
  *   - WebAssembly SIMD128
  *   - POWER8 VSX
  *   - s390x ZVector
+ *   - RISC-V Vector (RVV) - placeholder implementation
  * This can be controlled via the @ref XXH_VECTOR macro, but it automatically
  * selects the best version according to predefined macros. For the x86 family, an
  * automatic runtime dispatcher is included separately in @ref xxh_x86dispatch.c.
@@ -3433,6 +3434,8 @@ XXH_PUBLIC_API XXH64_hash_t XXH64_hashFromCanonical(XXH_NOESCAPE const XXH64_can
 #    define inline __inline__  /* circumvent a clang bug */
 #    include <arm_neon.h>
 #    undef inline
+#  elif defined(__riscv_vector) && defined(__riscv_v_intrinsic)
+#    include <riscv_vector.h>
 #  elif defined(__AVX2__)
 #    include <immintrin.h>
 #  elif defined(__SSE2__)
@@ -3559,6 +3562,7 @@ enum XXH_VECTOR_TYPE /* fake enum */ {
                        */
     XXH_VSX    = 5,  /*!< VSX and ZVector for POWER8/z13 (64-bit) */
     XXH_SVE    = 6,  /*!< SVE for some ARMv8-A and ARMv9-A */
+    XXH_RVV    = 7,  /*!< RISC-V Vector (RVV) for RISC-V processors with vector extension */
 };
 /*!
  * @ingroup tuning
@@ -3581,6 +3585,7 @@ enum XXH_VECTOR_TYPE /* fake enum */ {
 #  define XXH_NEON   4
 #  define XXH_VSX    5
 #  define XXH_SVE    6
+#  define XXH_RVV    7
 #endif
 
 #ifndef XXH_VECTOR    /* can be defined on command line */
@@ -3595,6 +3600,8 @@ enum XXH_VECTOR_TYPE /* fake enum */ {
     || (defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__) \
    )
 #    define XXH_VECTOR XXH_NEON
+#  elif defined(__riscv_vector) && defined(__riscv_v_intrinsic)
+#    define XXH_VECTOR XXH_RVV
 #  elif defined(__AVX512F__)
 #    define XXH_VECTOR XXH_AVX512
 #  elif defined(__AVX2__)
@@ -3642,6 +3649,8 @@ enum XXH_VECTOR_TYPE /* fake enum */ {
 #     define XXH_ACC_ALIGN 64
 #  elif XXH_VECTOR == XXH_SVE   /* sve */
 #     define XXH_ACC_ALIGN 64
+#  elif XXH_VECTOR == XXH_RVV   /* rvv */
+#     define XXH_ACC_ALIGN 64
 #  endif
 #endif
 
@@ -3649,6 +3658,8 @@ enum XXH_VECTOR_TYPE /* fake enum */ {
     || XXH_VECTOR == XXH_AVX2 || XXH_VECTOR == XXH_AVX512
 #  define XXH_SEC_ALIGN XXH_ACC_ALIGN
 #elif XXH_VECTOR == XXH_SVE
+#  define XXH_SEC_ALIGN XXH_ACC_ALIGN
+#elif XXH_VECTOR == XXH_RVV
 #  define XXH_SEC_ALIGN XXH_ACC_ALIGN
 #else
 #  define XXH_SEC_ALIGN 8
@@ -3942,6 +3953,21 @@ do { \
     acc = svadd_u64_x(mask, acc, mul);                               \
 } while (0)
 #endif /* XXH_VECTOR == XXH_SVE */
+
+#if XXH_VECTOR == XXH_RVV
+/* RISC-V Vector (RVV) type definitions and helper macros */
+/* TODO: Implement RISC-V RVV specific types and operations */
+/* These are placeholders for future RISC-V RVV implementation */
+typedef uint64_t xxh_rvv_u64_t;  /* Placeholder for RVV 64-bit vector type */
+typedef uint32_t xxh_rvv_u32_t;  /* Placeholder for RVV 32-bit vector type */
+
+/* Placeholder macro for RISC-V RVV accumulate operation */
+#define ACCRND_RVV(acc, offset) \
+do { \
+    /* TODO: Implement RISC-V RVV accumulate operation */ \
+    /* This should use RISC-V vector intrinsics when available */ \
+} while (0)
+#endif /* XXH_VECTOR == XXH_RVV */
 
 /* prefetch
  * can be disabled, by declaring XXH_NO_PREFETCH build macro */
@@ -5281,6 +5307,59 @@ XXH3_accumulate_sve(xxh_u64* XXH_RESTRICT acc,
 
 #endif
 
+#if (XXH_VECTOR == XXH_RVV)
+
+XXH_FORCE_INLINE void
+XXH3_accumulate_512_rvv( void* XXH_RESTRICT acc,
+                   const void* XXH_RESTRICT input,
+                   const void* XXH_RESTRICT secret)
+{
+    /* TODO: Implement RISC-V RVV accumulate_512 function */
+    /* This is a placeholder that falls back to scalar implementation */
+    /* Future implementation should use RISC-V vector intrinsics */
+    
+    /* For now, fall back to scalar implementation */
+    XXH3_accumulate_512_scalar(acc, input, secret);
+}
+
+XXH_FORCE_INLINE void
+XXH3_accumulate_rvv(xxh_u64* XXH_RESTRICT acc,
+               const xxh_u8* XXH_RESTRICT input,
+               const xxh_u8* XXH_RESTRICT secret,
+               size_t nbStripes)
+{
+    /* TODO: Implement RISC-V RVV accumulate function */
+    /* This is a placeholder that falls back to scalar implementation */
+    /* Future implementation should use RISC-V vector intrinsics */
+    
+    /* For now, fall back to scalar implementation */
+    XXH3_accumulate_scalar(acc, input, secret, nbStripes);
+}
+
+XXH_FORCE_INLINE void
+XXH3_scrambleAcc_rvv(void* XXH_RESTRICT acc, const void* XXH_RESTRICT secret)
+{
+    /* TODO: Implement RISC-V RVV scramble function */
+    /* This is a placeholder that falls back to scalar implementation */
+    /* Future implementation should use RISC-V vector intrinsics */
+    
+    /* For now, fall back to scalar implementation */
+    XXH3_scrambleAcc_scalar(acc, secret);
+}
+
+XXH_FORCE_INLINE void
+XXH3_initCustomSecret_rvv(void* XXH_RESTRICT customSecret, xxh_u64 seed64)
+{
+    /* TODO: Implement RISC-V RVV init custom secret function */
+    /* This is a placeholder that falls back to scalar implementation */
+    /* Future implementation should use RISC-V vector intrinsics */
+    
+    /* For now, fall back to scalar implementation */
+    XXH3_initCustomSecret_scalar(customSecret, seed64);
+}
+
+#endif
+
 /* scalar variants - universal */
 
 #if defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
@@ -5510,6 +5589,12 @@ typedef void (*XXH3_f_initCustomSecret)(void* XXH_RESTRICT, xxh_u64);
 #define XXH3_accumulate     XXH3_accumulate_sve
 #define XXH3_scrambleAcc    XXH3_scrambleAcc_scalar
 #define XXH3_initCustomSecret XXH3_initCustomSecret_scalar
+
+#elif (XXH_VECTOR == XXH_RVV)
+#define XXH3_accumulate_512 XXH3_accumulate_512_rvv
+#define XXH3_accumulate     XXH3_accumulate_rvv
+#define XXH3_scrambleAcc    XXH3_scrambleAcc_rvv
+#define XXH3_initCustomSecret XXH3_initCustomSecret_rvv
 
 #else /* scalar */
 
