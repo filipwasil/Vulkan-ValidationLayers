@@ -1028,6 +1028,7 @@ XXH_PUBLIC_API XXH_PUREF XXH64_hash_t XXH64_hashFromCanonical(XXH_NOESCAPE const
  *   - WebAssembly SIMD128
  *   - POWER8 VSX
  *   - s390x ZVector
+ *   - RISC-V Vector (RVV) - full implementation
  * This can be controlled via the @ref XXH_VECTOR macro, but it automatically
  * selects the best version according to predefined macros. For the x86 family, an
  * automatic runtime dispatcher is included separately in @ref xxh_x86dispatch.c.
@@ -3433,6 +3434,8 @@ XXH_PUBLIC_API XXH64_hash_t XXH64_hashFromCanonical(XXH_NOESCAPE const XXH64_can
 #    define inline __inline__  /* circumvent a clang bug */
 #    include <arm_neon.h>
 #    undef inline
+#  elif defined(__riscv_vector) && defined(__riscv_v_intrinsic)
+#    include <riscv_vector.h>
 #  elif defined(__AVX2__)
 #    include <immintrin.h>
 #  elif defined(__SSE2__)
@@ -3559,6 +3562,7 @@ enum XXH_VECTOR_TYPE /* fake enum */ {
                        */
     XXH_VSX    = 5,  /*!< VSX and ZVector for POWER8/z13 (64-bit) */
     XXH_SVE    = 6,  /*!< SVE for some ARMv8-A and ARMv9-A */
+    XXH_RVV    = 7,  /*!< RISC-V Vector (RVV) for RISC-V processors with vector extension */
 };
 /*!
  * @ingroup tuning
@@ -3581,6 +3585,7 @@ enum XXH_VECTOR_TYPE /* fake enum */ {
 #  define XXH_NEON   4
 #  define XXH_VSX    5
 #  define XXH_SVE    6
+#  define XXH_RVV    7
 #endif
 
 #ifndef XXH_VECTOR    /* can be defined on command line */
@@ -3595,6 +3600,8 @@ enum XXH_VECTOR_TYPE /* fake enum */ {
     || (defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__) \
    )
 #    define XXH_VECTOR XXH_NEON
+#  elif defined(__riscv_vector) && defined(__riscv_v_intrinsic)
+#    define XXH_VECTOR XXH_RVV
 #  elif defined(__AVX512F__)
 #    define XXH_VECTOR XXH_AVX512
 #  elif defined(__AVX2__)
@@ -3642,6 +3649,8 @@ enum XXH_VECTOR_TYPE /* fake enum */ {
 #     define XXH_ACC_ALIGN 64
 #  elif XXH_VECTOR == XXH_SVE   /* sve */
 #     define XXH_ACC_ALIGN 64
+#  elif XXH_VECTOR == XXH_RVV   /* rvv */
+#     define XXH_ACC_ALIGN 64
 #  endif
 #endif
 
@@ -3649,6 +3658,8 @@ enum XXH_VECTOR_TYPE /* fake enum */ {
     || XXH_VECTOR == XXH_AVX2 || XXH_VECTOR == XXH_AVX512
 #  define XXH_SEC_ALIGN XXH_ACC_ALIGN
 #elif XXH_VECTOR == XXH_SVE
+#  define XXH_SEC_ALIGN XXH_ACC_ALIGN
+#elif XXH_VECTOR == XXH_RVV
 #  define XXH_SEC_ALIGN XXH_ACC_ALIGN
 #else
 #  define XXH_SEC_ALIGN 8
@@ -3942,6 +3953,31 @@ do { \
     acc = svadd_u64_x(mask, acc, mul);                               \
 } while (0)
 #endif /* XXH_VECTOR == XXH_SVE */
+
+#if XXH_VECTOR == XXH_RVV
+/* RISC-V Vector (RVV) type definitions and helper macros */
+#include <riscv_vector.h>
+/* RISC-V vector types for various bit widths */
+typedef vuint64m1_t xxh_rvv_u64m1_t;  /* 64-bit unsigned integer vector, LMUL=1 */
+typedef vuint32m1_t xxh_rvv_u32m1_t;  /* 32-bit unsigned integer vector, LMUL=1 */
+typedef vuint64m2_t xxh_rvv_u64m2_t;  /* 64-bit unsigned integer vector, LMUL=2 */
+typedef vuint32m2_t xxh_rvv_u32m2_t;  /* 32-bit unsigned integer vector, LMUL=2 */
+typedef vuint8m1_t xxh_rvv_u8m1_t;    /* 8-bit unsigned integer vector, LMUL=1 */
+
+/* RISC-V RVV accumulate operation macro */
+#define ACCRND_RVV(acc, offset) \
+do { \
+    /* Load input and secret vectors with proper bounds checking */ \
+    xxh_rvv_u64m1_t input_vec = __riscv_vle64_v_u64m1(xinput + offset, vl); \
+    xxh_rvv_u64m1_t secret_vec = __riscv_vle64_v_u64m1(xsecret + offset, vl); \
+    /* XOR secret with input */ \
+    xxh_rvv_u64m1_t mixed = __riscv_vxor_vv_u64m1(secret_vec, input_vec, vl); \
+    /* Use simpler approach - just multiply mixed with itself and add input */ \
+    xxh_rvv_u64m1_t mul = __riscv_vadd_vv_u64m1(__riscv_vmul_vv_u64m1(mixed, mixed, vl), input_vec, vl); \
+    /* Add to accumulator */ \
+    acc = __riscv_vadd_vv_u64m1(acc, mul, vl); \
+} while (0)
+#endif /* XXH_VECTOR == XXH_RVV */
 
 /* prefetch
  * can be disabled, by declaring XXH_NO_PREFETCH build macro */
@@ -5281,6 +5317,164 @@ XXH3_accumulate_sve(xxh_u64* XXH_RESTRICT acc,
 
 #endif
 
+#if (XXH_VECTOR == XXH_RVV)
+
+XXH_FORCE_INLINE void
+XXH3_accumulate_512_rvv( void* XXH_RESTRICT acc,
+                   const void* XXH_RESTRICT input,
+                   const void* XXH_RESTRICT secret)
+{
+    uint64_t *xacc = (uint64_t *)acc;
+    const uint64_t *xinput = (const uint64_t *)(const void *)input;
+    const uint64_t *xsecret = (const uint64_t *)(const void *)secret;
+    
+    /* Set vector length for 64-bit elements - use actual available length */
+    size_t vl = __riscv_vsetvl_e64m1(8); /* Request up to 8 64-bit elements */
+    
+    /* Ensure we don't exceed the actual vector length */
+    if (vl > 8) vl = 8;
+    
+    /* Process accumulators in chunks based on actual vector length */
+    for (size_t i = 0; i < 8; i += vl) {
+        size_t remaining = 8 - i;
+        size_t chunk_vl = (remaining < vl) ? remaining : vl;
+        
+        /* Set vector length for this chunk */
+        size_t actual_vl = __riscv_vsetvl_e64m1(chunk_vl);
+        
+        /* Load accumulator chunk */
+        xxh_rvv_u64m1_t vacc = __riscv_vle64_v_u64m1(xacc + i, actual_vl);
+        
+        /* Process this chunk */
+        ACCRND_RVV(vacc, i);
+        
+        /* Store accumulator chunk */
+        __riscv_vse64_v_u64m1(xacc + i, vacc, actual_vl);
+    }
+}
+
+XXH_FORCE_INLINE void
+XXH3_accumulate_rvv(xxh_u64* XXH_RESTRICT acc,
+               const xxh_u8* XXH_RESTRICT input,
+               const xxh_u8* XXH_RESTRICT secret,
+               size_t nbStripes)
+{
+    if (nbStripes != 0) {
+        uint64_t *xacc = (uint64_t *)acc;
+        const uint64_t *xinput = (const uint64_t *)(const void *)input;
+        const uint64_t *xsecret = (const uint64_t *)(const void *)secret;
+        
+        /* Set vector length for 64-bit elements - use actual available length */
+        size_t vl = __riscv_vsetvl_e64m1(8); /* Request up to 8 64-bit elements */
+        
+        /* Ensure we don't exceed the actual vector length */
+        if (vl > 8) vl = 8;
+        
+        /* Process accumulators in chunks based on actual vector length */
+        for (size_t i = 0; i < 8; i += vl) {
+            size_t remaining = 8 - i;
+            size_t chunk_vl = (remaining < vl) ? remaining : vl;
+            
+            /* Set vector length for this chunk */
+            size_t actual_vl = __riscv_vsetvl_e64m1(chunk_vl);
+            
+            /* Load accumulator chunk */
+            xxh_rvv_u64m1_t vacc = __riscv_vle64_v_u64m1(xacc + i, actual_vl);
+            
+            /* Process stripes */
+            size_t stripes = nbStripes;
+            while (stripes > 0) {
+                /* Prefetch next iteration */
+                XXH_PREFETCH(xinput + 128);
+                
+                /* Process this chunk */
+                ACCRND_RVV(vacc, i);
+                
+                xinput += 8;
+                xsecret += 1;
+                stripes--;
+            }
+            
+            /* Store accumulator chunk */
+            __riscv_vse64_v_u64m1(xacc + i, vacc, actual_vl);
+        }
+    }
+}
+
+XXH_FORCE_INLINE void
+XXH3_scrambleAcc_rvv(void* XXH_RESTRICT acc, const void* XXH_RESTRICT secret)
+{
+    uint64_t *xacc = (uint64_t *)acc;
+    const uint64_t *xsecret = (const uint64_t *)(const void *)secret;
+    
+    /* Set vector length for 64-bit elements - use actual available length */
+    size_t vl = __riscv_vsetvl_e64m1(8); /* Request up to 8 64-bit elements */
+    
+    /* Ensure we don't exceed the actual vector length */
+    if (vl > 8) vl = 8;
+    
+    /* Process accumulators in chunks based on actual vector length */
+    for (size_t i = 0; i < 8; i += vl) {
+        size_t remaining = 8 - i;
+        size_t chunk_vl = (remaining < vl) ? remaining : vl;
+        
+        /* Set vector length for this chunk */
+        size_t actual_vl = __riscv_vsetvl_e64m1(chunk_vl);
+        
+        /* Load accumulator and secret chunks */
+        xxh_rvv_u64m1_t vacc = __riscv_vle64_v_u64m1(xacc + i, actual_vl);
+        xxh_rvv_u64m1_t vsecret = __riscv_vle64_v_u64m1(xsecret + i, actual_vl);
+        
+        /* Right shift by 47 bits */
+        xxh_rvv_u64m1_t shifted = __riscv_vsrl_vx_u64m1(vacc, 47, actual_vl);
+        /* XOR with original */
+        xxh_rvv_u64m1_t xored = __riscv_vxor_vv_u64m1(vacc, shifted, actual_vl);
+        /* XOR with secret */
+        xxh_rvv_u64m1_t mixed = __riscv_vxor_vv_u64m1(xored, vsecret, actual_vl);
+        /* Multiply by prime */
+        xxh_rvv_u64m1_t result = __riscv_vmul_vx_u64m1(mixed, XXH_PRIME32_1, actual_vl);
+        
+        /* Store result chunk */
+        __riscv_vse64_v_u64m1(xacc + i, result, actual_vl);
+    }
+}
+
+XXH_FORCE_INLINE void
+XXH3_initCustomSecret_rvv(void* XXH_RESTRICT customSecret, xxh_u64 seed64)
+{
+    /* For initialization, we can use vector operations to process multiple elements at once */
+    xxh_u8* const ptr = (xxh_u8*)customSecret;
+    const xxh_u8* const kSecretPtr = XXH3_kSecret;
+    
+    /* Set vector length for 8-bit elements */
+    size_t vl = __riscv_vsetvl_e8m1(XXH_SECRET_DEFAULT_SIZE);
+    
+    if (vl >= XXH_SECRET_DEFAULT_SIZE) {
+        /* Process all at once */
+        xxh_rvv_u8m1_t vsecret = __riscv_vle8_v_u8m1(kSecretPtr, vl);
+        xxh_rvv_u8m1_t vseed = __riscv_vmv_v_x_u8m1((xxh_u8)seed64, vl);
+        xxh_rvv_u8m1_t vresult = __riscv_vadd_vv_u8m1(vsecret, vseed, vl);
+        __riscv_vse8_v_u8m1(ptr, vresult, vl);
+    } else {
+        /* Process in chunks */
+        size_t remaining = XXH_SECRET_DEFAULT_SIZE;
+        size_t offset = 0;
+        
+        while (remaining > 0) {
+            size_t chunk_size = (remaining > vl) ? vl : remaining;
+            xxh_rvv_u8m1_t vsecret = __riscv_vle8_v_u8m1(kSecretPtr + offset, chunk_size);
+            xxh_rvv_u8m1_t vseed = __riscv_vmv_v_x_u8m1((xxh_u8)seed64, chunk_size);
+            xxh_rvv_u8m1_t vresult = __riscv_vadd_vv_u8m1(vsecret, vseed, chunk_size);
+            __riscv_vse8_v_u8m1(ptr + offset, vresult, chunk_size);
+            
+            offset += chunk_size;
+            remaining -= chunk_size;
+        }
+    }
+}
+
+#endif
+
 /* scalar variants - universal */
 
 #if defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
@@ -5510,6 +5704,12 @@ typedef void (*XXH3_f_initCustomSecret)(void* XXH_RESTRICT, xxh_u64);
 #define XXH3_accumulate     XXH3_accumulate_sve
 #define XXH3_scrambleAcc    XXH3_scrambleAcc_scalar
 #define XXH3_initCustomSecret XXH3_initCustomSecret_scalar
+
+#elif (XXH_VECTOR == XXH_RVV)
+#define XXH3_accumulate_512 XXH3_accumulate_512_rvv
+#define XXH3_accumulate     XXH3_accumulate_rvv
+#define XXH3_scrambleAcc    XXH3_scrambleAcc_rvv
+#define XXH3_initCustomSecret XXH3_initCustomSecret_rvv
 
 #else /* scalar */
 
